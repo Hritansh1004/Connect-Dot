@@ -16,16 +16,20 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"></script>
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
+    const { initializeApp } = firebase;
+    const { getAuth, signInAnonymously, signInWithCustomToken } = firebase.auth;
+    const { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, addDoc, updateDoc, deleteDoc, getDocs, query, where, arrayUnion } = firebase.firestore;
+    firebase.firestore.setLogLevel('debug');
+    
+    // Global variables from the canvas environment
     const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
     const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : undefined;
-
-    const firebaseApp = firebase.initializeApp(firebaseConfig);
-    const firestoreDb = firebase.firestore();
-    const firebaseAuth = firebase.auth();
-    firebase.firestore.setLogLevel('debug');
 
     function App() {
       const [db, setDb] = useState(null);
@@ -52,18 +56,18 @@
           if (Object.keys(firebaseConfig).length === 0) {
             throw new Error("Firebase config is not defined.");
           }
-          const app = firebase.initializeApp(firebaseConfig);
-          const firestoreDb = app.firestore();
-          const firebaseAuth = app.auth();
+          const app = initializeApp(firebaseConfig);
+          const firestoreDb = getFirestore(app);
+          const firebaseAuth = getAuth(app);
           setDb(firestoreDb);
           setAuth(firebaseAuth);
 
           const signIn = async () => {
             try {
               if (initialAuthToken) {
-                await firebaseAuth.signInWithCustomToken(initialAuthToken);
+                await signInWithCustomToken(firebaseAuth, initialAuthToken);
               } else {
-                await firebaseAuth.signInAnonymously();
+                await signInAnonymously(firebaseAuth);
               }
               const currentUser = firebaseAuth.currentUser;
               setUserId(currentUser.uid);
@@ -83,9 +87,9 @@
         if (!db || !userId) return;
 
         if (isGameStarted && gameId) {
-          gameRef.current = db.collection('artifacts').doc('dots-and-boxes').collection('public').doc('games').doc(gameId);
-          const unsubscribe = gameRef.current.onSnapshot(docSnap => {
-            if (docSnap.exists) {
+          gameRef.current = doc(db, 'artifacts', appId, 'public', 'games', gameId);
+          const unsubscribe = onSnapshot(gameRef.current, docSnap => {
+            if (docSnap.exists()) {
               const gameData = docSnap.data();
               setLines(gameData.lines);
               setPlayerScores(gameData.scores);
@@ -120,7 +124,7 @@
         try {
           setIsWaitingForOpponent(true);
           const gameCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-          const newGameRef = db.collection('artifacts').doc('dots-and-boxes').collection('public').doc('games').doc(gameCode);
+          const newGameRef = doc(db, 'artifacts', appId, 'public', 'games', gameCode);
 
           const player = {
             id: userId,
@@ -128,7 +132,7 @@
             color: colors[0],
           };
 
-          await newGameRef.set({
+          await setDoc(newGameRef, {
             gridSize,
             lines: [],
             players: [player],
@@ -154,10 +158,10 @@
         }
 
         try {
-          const gameRef = db.collection('artifacts').doc('dots-and-boxes').collection('public').doc('games').doc(gameId);
-          const docSnap = await gameRef.get();
+          const gameRef = doc(db, 'artifacts', appId, 'public', 'games', gameId);
+          const docSnap = await getDoc(gameRef);
 
-          if (docSnap.exists) {
+          if (docSnap.exists()) {
             const gameData = docSnap.data();
             if (gameData.players.length >= 4) {
               setMessage("This game is full. Please try another one.");
@@ -170,8 +174,8 @@
                 initial: userId.substring(0, 3).toUpperCase(),
                 color: colors[gameData.players.length],
               };
-              await gameRef.update({
-                players: firebase.firestore.FieldValue.arrayUnion(newPlayer),
+              await updateDoc(gameRef, {
+                players: arrayUnion(newPlayer),
                 [`scores.${userId}`]: 0,
                 message: `${newPlayer.initial} has joined the game.`,
               });
@@ -185,7 +189,7 @@
           setMessage(`Error joining game: ${error.message}`);
         }
       };
-
+      
       const handleConfirmMove = async () => {
         if (!db || !gameId || !selectedLine || currentTurn !== userId) return;
 
@@ -217,13 +221,11 @@
           if (nextTurnIndex >= players.length) {
             nextTurnIndex = 0;
           }
-
           if (!claimedBox) {
             newCurrentTurn = players[nextTurnIndex]?.id;
           } else {
             newCurrentTurn = currentTurn;
           }
-
           const allPossibleLines = getPossibleLines(gridSize);
           if (newLines.length === allPossibleLines.length) {
             setMessage("Game over! Calculating scores...");
@@ -231,14 +233,13 @@
             setMessage(claimedBox ? "You captured a box! Take another turn." : `It's ${players.find(p => p.id === newCurrentTurn)?.initial}'s turn.`);
           }
 
-          await gameRef.current.update({
+          await updateDoc(gameRef.current, {
             lines: newLines,
             scores: newScores,
             capturedBoxes: newCapturedBoxes,
             currentTurn: newCurrentTurn,
             message: claimedBox ? "You captured a box! Take another turn." : `It's ${players.find(p => p.id === newCurrentTurn)?.initial}'s turn.`,
           });
-
           setSelectedLine(null);
 
         } catch (error) {
@@ -246,11 +247,9 @@
           setMessage(`Error confirming move: ${error.message}`);
         }
       };
-
       const handleUndo = () => {
         setSelectedLine(null);
       };
-
       const handleClickLine = (line) => {
         if (currentTurn !== userId) {
           setMessage("It's not your turn.");
@@ -262,86 +261,41 @@
         }
         setSelectedLine(line);
       };
-
       const getPossibleLines = (size) => {
         const possibleLines = [];
         for (let row = 0; row < size; row++) {
           for (let col = 0; col < size; col++) {
             if (col < size - 1) {
-              possibleLines.push({
-                id: `h-${row}-${col}`,
-                start: { row, col },
-                end: { row, col: col + 1 },
-                type: 'horizontal'
-              });
+              possibleLines.push({ id: `h-${row}-${col}`, start: { row, col }, end: { row, col: col + 1 }, type: 'horizontal' });
             }
             if (row < size - 1) {
-              possibleLines.push({
-                id: `v-${row}-${col}`,
-                start: { row, col },
-                end: { row: row + 1, col },
-                type: 'vertical'
-              });
+              possibleLines.push({ id: `v-${row}-${col}`, start: { row, col }, end: { row: row + 1, col }, type: 'vertical' });
             }
           }
         }
         return possibleLines;
       };
-
       const getPossibleBoxes = (line) => {
         const possibleBoxes = [];
         if (line.type === 'horizontal') {
           const { row, col } = line.start;
           if (row > 0) {
-            possibleBoxes.push({
-              key: `box-${row - 1}-${col}`,
-              sides: [
-                { id: `h-${row - 1}-${col}` },
-                { id: `h-${row}-${col}` },
-                { id: `v-${row - 1}-${col}` },
-                { id: `v-${row - 1}-${col + 1}` },
-              ]
-            });
+            possibleBoxes.push({ key: `box-${row - 1}-${col}`, sides: [{ id: `h-${row - 1}-${col}` }, { id: `h-${row}-${col}` }, { id: `v-${row - 1}-${col}` }, { id: `v-${row - 1}-${col + 1}` }] });
           }
           if (row < gridSize - 1) {
-            possibleBoxes.push({
-              key: `box-${row}-${col}`,
-              sides: [
-                { id: `h-${row}-${col}` },
-                { id: `h-${row + 1}-${col}` },
-                { id: `v-${row}-${col}` },
-                { id: `v-${row}-${col + 1}` },
-              ]
-            });
+            possibleBoxes.push({ key: `box-${row}-${col}`, sides: [{ id: `h-${row}-${col}` }, { id: `h-${row + 1}-${col}` }, { id: `v-${row}-${col}` }, { id: `v-${row}-${col + 1}` }] });
           }
         } else if (line.type === 'vertical') {
           const { row, col } = line.start;
           if (col > 0) {
-            possibleBoxes.push({
-              key: `box-${row}-${col - 1}`,
-              sides: [
-                { id: `v-${row}-${col - 1}` },
-                { id: `v-${row}-${col}` },
-                { id: `h-${row}-${col - 1}` },
-                { id: `h-${row + 1}-${col - 1}` },
-              ]
-            });
+            possibleBoxes.push({ key: `box-${row}-${col - 1}`, sides: [{ id: `v-${row}-${col - 1}` }, { id: `v-${row}-${col}` }, { id: `h-${row}-${col - 1}` }, { id: `h-${row + 1}-${col - 1}` }] });
           }
           if (col < gridSize - 1) {
-            possibleBoxes.push({
-              key: `box-${row}-${col}`,
-              sides: [
-                { id: `v-${row}-${col}` },
-                { id: `v-${row}-${col + 1}` },
-                { id: `h-${row}-${col}` },
-                { id: `h-${row + 1}-${col}` },
-              ]
-            });
+            possibleBoxes.push({ key: `box-${row}-${col}`, sides: [{ id: `v-${row}-${col}` }, { id: `v-${row}-${col + 1}` }, { id: `h-${row}-${col}` }, { id: `h-${row + 1}-${col}` }] });
           }
         }
         return possibleBoxes;
       };
-
       if (!db || !userId) {
         return (
           <div className="flex items-center justify-center min-h-screen bg-gray-100 p-4">
@@ -353,7 +307,6 @@
           </div>
         );
       }
-
       if (!isGameStarted) {
         return (
           <div className="flex items-center justify-center min-h-screen bg-gray-100 p-4">
@@ -385,13 +338,11 @@
           </div>
         );
       }
-
       const myPlayer = players.find(p => p.id === userId);
       const myColor = myPlayer?.color || 'transparent';
       const isGameOver = lines.length === getPossibleLines(gridSize).length;
       const winner = isGameOver ? Object.keys(playerScores).reduce((a, b) => playerScores[a] > playerScores[b] ? a : b) : null;
       const winnerInitial = players.find(p => p.id === winner)?.initial;
-
       return (
         <div className="flex flex-col min-h-screen bg-gray-100 p-4 font-sans">
           <div className="flex-1 flex flex-col items-center justify-center">
@@ -426,13 +377,35 @@
                 const ownerColor = players.find(p => p.id === owner)?.color;
                 let lineStyle = '';
                 if (line.type === 'horizontal') {
-                  lineStyle = `h-2 w-40 top-[${line.start.row * 40 + 10}px] left-[${line.start.col * 40 + 14}px]`;
+                  lineStyle = `h-2 w-[40px] top-[${line.start.row * 40 + 10}px] left-[${line.start.col * 40 + 14}px]`;
                 } else {
-                  lineStyle = `w-2 h-40 top-[${line.start.row * 40 + 14}px] left-[${line.start.col * 40 + 10}px]`;
+                  lineStyle = `w-2 h-[40px] top-[${line.start.row * 40 + 14}px] left-[${line.start.col * 40 + 10}px]`;
                 }
                 return (<div key={line.id} className={`absolute rounded-full transition-all duration-300 ease-in-out ${isDrawn ? '' : (currentTurn === userId ? 'hover:bg-gray-400 cursor-pointer' : '')} `} style={{ ...lineStyle, backgroundColor: isSelected ? myColor : (isDrawn ? ownerColor : 'transparent') }} onClick={() => !isDrawn && currentTurn === userId ? handleClickLine(line) : null}></div>);
               })}
               {capturedBoxes.map(box => (<div key={box.key} className="absolute flex items-center justify-center rounded-lg text-white font-bold text-4xl shadow-md" style={{ top: `${(box.key.split('-')[1] * 40) + 14}px`, left: `${(box.key.split('-')[2] * 40) + 14}px`, width: '32px', height: '32px', backgroundColor: box.color, zIndex: 20 }}>{box.initial}</div>))}
             </div>
             <div className="mt-6 flex space-x-4">
-              <button onClick={handleConfirmMove} disabled={!selectedLine || currentTurn !== userId || isGameOver} className={`p-3 rounded-lg font-
+              <button onClick={handleConfirmMove} disabled={!selectedLine || currentTurn !== userId || isGameOver} className={`p-3 rounded-lg font-bold text-white shadow-lg transition-colors ${!selectedLine || currentTurn !== userId || isGameOver ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}>Confirm Move</button>
+              <button onClick={handleUndo} disabled={!selectedLine || currentTurn !== userId || isGameOver} className={`p-3 rounded-lg font-bold text-white shadow-lg transition-colors ${!selectedLine || currentTurn !== userId || isGameOver ? 'bg-gray-400 cursor-not-allowed' : 'bg-red-600 hover:bg-red-700'}`}>Undo</button>
+            </div>
+            {isGameOver && (<div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4">
+              <div className="bg-white p-8 rounded-xl shadow-2xl text-center">
+                <h2 className="text-3xl font-extrabold text-gray-800 mb-4">Game Over!</h2>
+                {winner ? (<p className="text-xl text-gray-600">The winner is <span className="font-bold">{winnerInitial}</span> with a score of {playerScores[winner]}!</p>) : (<p className="text-xl text-gray-600">It's a tie!</p>)}
+                <div className="mt-6">
+                  <h3 className="text-lg font-semibold text-gray-700">Final Scores:</h3>
+                  {players.map(player => (<p key={player.id} className="text-md text-gray-600 mt-2">
+                    <span className="font-bold" style={{ color: player.color }}>{player.initial}</span>: {playerScores[player.id]} boxes
+                  </p>))}
+                </div>
+              </div>
+            </div>)}
+          </div>
+        </div>
+      );
+    }
+    ReactDOM.render(React.createElement(App, null), document.getElementById('root'));
+  </script>
+</body>
+</html>
